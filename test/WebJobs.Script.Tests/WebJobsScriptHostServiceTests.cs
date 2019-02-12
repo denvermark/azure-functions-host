@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using Microsoft.Azure.WebJobs.Script.Config;
 using Microsoft.Azure.WebJobs.Script.Scale;
 using Microsoft.Azure.WebJobs.Script.WebHost;
+using Microsoft.Azure.WebJobs.Script.WebHost.Management;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -50,10 +51,11 @@ namespace Microsoft.Azure.WebJobs.Script.Tests
             var mockEnvironment = new Mock<IEnvironment>();
             var healthMonitorOptions = new OptionsWrapper<HostHealthMonitorOptions>(new HostHealthMonitorOptions());
             var hostPerformanceManager = new HostPerformanceManager(mockEnvironment.Object, healthMonitorOptions);
+            var functionsSyncManagerMock = new Mock<IFunctionsSyncManager>(MockBehavior.Strict);
 
             var hostService = new WebJobsScriptHostService(
                 monitor, hostBuilder.Object, NullLoggerFactory.Instance, mockRootServiceProvider.Object, mockRootScopeFactory.Object,
-                mockScriptWebHostEnvironment.Object, mockEnvironment.Object, hostPerformanceManager, healthMonitorOptions);
+                mockScriptWebHostEnvironment.Object, mockEnvironment.Object, hostPerformanceManager, healthMonitorOptions, functionsSyncManagerMock.Object);
 
             await hostService.StartAsync(CancellationToken.None);
 

@@ -9,6 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Azure.WebJobs.Logging;
 using Microsoft.Azure.WebJobs.Script.Scale;
+using Microsoft.Azure.WebJobs.Script.WebHost.Management;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -28,6 +29,7 @@ namespace Microsoft.Azure.WebJobs.Script.WebHost
         private readonly IOptions<HostHealthMonitorOptions> _healthMonitorOptions;
         private readonly SlidingWindow<bool> _healthCheckWindow;
         private readonly Timer _hostHealthCheckTimer;
+        private readonly IFunctionsSyncManager _functionsSyncManager;
 
         private IHost _host;
         private CancellationTokenSource _startupLoopTokenSource;
@@ -37,7 +39,7 @@ namespace Microsoft.Azure.WebJobs.Script.WebHost
 
         public WebJobsScriptHostService(IOptionsMonitor<ScriptApplicationHostOptions> applicationHostOptions, IScriptHostBuilder scriptHostBuilder, ILoggerFactory loggerFactory, IServiceProvider rootServiceProvider,
             IServiceScopeFactory rootScopeFactory, IScriptWebHostEnvironment scriptWebHostEnvironment, IEnvironment environment,
-            HostPerformanceManager hostPerformanceManager, IOptions<HostHealthMonitorOptions> healthMonitorOptions)
+            HostPerformanceManager hostPerformanceManager, IOptions<HostHealthMonitorOptions> healthMonitorOptions, IFunctionsSyncManager functionsSyncManager)
         {
             if (loggerFactory == null)
             {
@@ -52,6 +54,7 @@ namespace Microsoft.Azure.WebJobs.Script.WebHost
             _performanceManager = hostPerformanceManager ?? throw new ArgumentNullException(nameof(hostPerformanceManager));
             _healthMonitorOptions = healthMonitorOptions ?? throw new ArgumentNullException(nameof(healthMonitorOptions));
             _logger = loggerFactory.CreateLogger(ScriptConstants.LogCategoryHostGeneral);
+            _functionsSyncManager = functionsSyncManager;
 
             State = ScriptHostState.Default;
 
@@ -154,6 +157,8 @@ namespace Microsoft.Azure.WebJobs.Script.WebHost
                         State = ScriptHostState.Running;
                     }
                 }
+
+                QueueBackgroundTasks(cancellationToken);
             }
             catch (OperationCanceledException)
             {
@@ -267,6 +272,39 @@ namespace Microsoft.Azure.WebJobs.Script.WebHost
             finally
             {
                 Interlocked.Exchange(ref _restarting, 0);
+            }
+        }
+
+        private void QueueBackgroundTasks(CancellationToken cancellationToken)
+        {
+            var tIgnore = Task.Run(async () =>
+            {
+                // Kick off a conditional SyncTriggers operation in the background
+                // the delay is important - it gives the host time to establish
+                // whether it is the primary, and also keeps these operations off
+                // of the cold start path.
+                // Note that if the host instance is restarted/stopped before the
+                // delay elapses, the sync won't happen. It will only happen if the
+                // host starts successfully and stays running at least until the delay
+                // elapses.
+                await Task.Delay(TimeSpan.FromSeconds(30), cancellationToken);
+                await SyncTriggersAsync();
+            }, cancellationToken).ContinueWith(t =>
+            {
+                if (t.IsFaulted)
+                {
+                    _logger.LogError(t.Exception, "Background processing failed.");
+                    t.Exception.Handle(e => true);
+                }
+            }, TaskContinuationOptions.ExecuteSynchronously);
+        }
+
+        private async Task SyncTriggersAsync()
+        {
+            var primaryHostStateProvider = _host?.Services.GetService<IPrimaryHostStateProvider>();
+            if (primaryHostStateProvider != null && primaryHostStateProvider.IsPrimary)
+            {
+                await _functionsSyncManager.TrySyncTriggersAsync(checkHash: true);
             }
         }
 
